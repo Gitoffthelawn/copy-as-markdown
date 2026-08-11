@@ -1,6 +1,9 @@
 import './ensure-browser-global.js'; // MUST be first — defines `browser` for the service worker.
-import Settings from './lib/settings.js';
-import type { CodeBlockStyle } from './lib/settings.js';
+import type { CodeBlockStyle } from './lib/selection-settings.js';
+import SelectionSettings from './lib/selection-settings.js';
+import type { MarkdownSettings } from './lib/markdown-settings.js';
+import { loadMarkdownSettings, markdownSettingsKeys, readMarkdownSettings } from './lib/markdown-settings.js';
+import type { BulletListMarker } from './lib/markdown.js';
 import Markdown from './lib/markdown.js';
 import { Bookmarks } from './bookmarks.js';
 import BuiltInStyleSettings from './lib/built-in-style-settings.js';
@@ -29,9 +32,11 @@ import { createBrowserRuntimeMessageHandler } from './handlers/runtime-message-h
 import type { KeyboardCommandId } from './contracts/commands.js';
 import type { PendingPopupFeedbackCode, RuntimeMessage } from './contracts/messages.js';
 
-// Initialize markdown and bookmarks
+// Initialize markdown and bookmarks. `markdownInstance` renders link and tab
+// exports, so it carries the Multiple Links style; Copy Selection keeps its own.
 const markdownInstance = new Markdown();
-let selectionCodeBlockStyle: CodeBlockStyle = 'fenced';
+let selectionBulletListMarker: BulletListMarker = SelectionSettings.defaultSettings.bulletListMarker;
+let selectionCodeBlockStyle: CodeBlockStyle = SelectionSettings.defaultSettings.codeBlockStyle;
 const bookmarks = new Bookmarks({
   markdown: markdownInstance,
 });
@@ -72,7 +77,7 @@ const selectionConverterService = createBrowserSelectionConverterService(
   {
     getTurndownOptions: () => ({
       headingStyle: 'atx',
-      bulletListMarker: markdownInstance.unorderedListChar,
+      bulletListMarker: selectionBulletListMarker,
       codeBlockStyle: selectionCodeBlockStyle,
     }),
   },
@@ -115,19 +120,12 @@ async function clearPendingPopupFeedback(): Promise<void> {
   }
 }
 
-async function refreshMarkdownInstance(): Promise<void> {
-  let settings;
-  try {
-    settings = await Settings.getAll();
-  } catch (error) {
-    console.error('error getting settings', error);
-    return;
-  }
-
+function applyMarkdownSettings(settings: MarkdownSettings): void {
   markdownInstance.alwaysEscapeLinkBracket = settings.alwaysEscapeLinkBrackets;
-  markdownInstance.unorderedListStyle = settings.styleOfUnorderedList;
-  markdownInstance.indentationStyle = settings.styleOfTabGroupIndentation;
-  selectionCodeBlockStyle = settings.styleOfCodeBlock;
+  markdownInstance.bulletListMarker = settings.multipleLinks.bulletListMarker;
+  markdownInstance.indentationStyle = settings.multipleLinks.tabGroupIndentation;
+  selectionBulletListMarker = settings.selection.bulletListMarker;
+  selectionCodeBlockStyle = settings.selection.codeBlockStyle;
 }
 
 browser.alarms.onAlarm.addListener(async (alarm) => {
@@ -272,17 +270,25 @@ browser.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   return true;
 });
 
+// Migration already ran at startup, so a change only needs a re-read.
 browser.storage.sync.onChanged.addListener(async (changes) => {
-  const hasSettingsChanged = Object.entries(changes)
-    .filter(([key]) => Settings.keys.includes(key))
-    .length > 0;
-  if (hasSettingsChanged) {
-    await refreshMarkdownInstance();
+  const hasSettingsChanged = Object.keys(changes)
+    .some(key => markdownSettingsKeys.includes(key));
+  if (!hasSettingsChanged) {
+    return;
   }
+
+  await readMarkdownSettings()
+    .then(applyMarkdownSettings)
+    .catch(error => console.error('error getting settings', error));
 });
 
-refreshMarkdownInstance()
-  .then(() => null /* NOP */);
+// Runs on every worker start: migrates an upgrading profile before the first
+// read, so the user's Markdown style survives without them opening the
+// settings page.
+loadMarkdownSettings()
+  .then(applyMarkdownSettings)
+  .catch(error => console.error('error getting settings', error));
 
 if (BUILD_PROFILE === 'e2e') {
   // Flip this flag last so e2e's getServiceWorker() can gate on "listeners wired"

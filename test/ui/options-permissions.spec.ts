@@ -1,14 +1,12 @@
 import { page } from 'vitest/browser';
 import { beforeAll, describe, expect, it, vi } from 'vitest';
 
-const settingsMock = {
-  reset: vi.fn(),
-};
+const resetMarkdownSettingsMock = vi.fn();
 
 const loadPermissionsMock = vi.fn();
 
-vi.mock('../../src/lib/settings.js', () => ({
-  default: settingsMock,
+vi.mock('../../src/lib/markdown-settings.js', () => ({
+  resetMarkdownSettings: resetMarkdownSettingsMock,
 }));
 
 vi.mock('../../src/ui/permissions-ui.js', async (importOriginal) => {
@@ -121,7 +119,7 @@ describe('options permissions UI', () => {
     // Use the existing mocks from the global browser object set up in beforeAll
     const removeMock = (globalThis as any).browser.permissions.remove;
 
-    settingsMock.reset.mockClear();
+    resetMarkdownSettingsMock.mockClear();
     removeMock.mockClear();
 
     const revokeAll = page.getByRole('button', { name: /Revoke All/ });
@@ -130,7 +128,7 @@ describe('options permissions UI', () => {
     await revokeAll.click();
     await flush();
 
-    expect(settingsMock.reset).toHaveBeenCalled();
+    expect(resetMarkdownSettingsMock).toHaveBeenCalledTimes(1);
     // Only tabs is granted in the initial setup, bookmarks is unavailable
     // So only tabs and tabGroups are in the revoke call
     expect(removeMock).toHaveBeenCalledWith({ permissions: ['tabs', 'tabGroups'] });

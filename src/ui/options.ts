@@ -1,9 +1,32 @@
 import '../ensure-browser-global.js'; // MUST be first — installs `browser` for old Chrome.
-import type { TabGroupIndentationStyle, UnorderedListStyle } from '../lib/markdown.js';
+import type { BulletListMarker, TabGroupIndentationStyle } from '../lib/markdown.js';
+import type { MarkdownSettings } from '../lib/markdown-settings.js';
+import {
+  loadMarkdownSettings,
+  markdownSettingsKeys,
+  readMarkdownSettings,
+  resetMarkdownSettings,
+  setSharedBulletListMarker,
+} from '../lib/markdown-settings.js';
+import MultipleLinksSettings from '../lib/multiple-links-settings.js';
+import type { CodeBlockStyle } from '../lib/selection-settings.js';
+import SelectionSettings from '../lib/selection-settings.js';
 import Settings from '../lib/settings.js';
-import type { CodeBlockStyle } from '../lib/settings.js';
 import type { PermissionStatus } from './permissions-ui.js';
 import { disableUiIfPermissionsNotGranted, hideUiIfPermissionsNotGranted, loadPermissions } from './permissions-ui.js';
+
+// This transitional page still presents one Unordered List Character control for
+// both Copy Selection and Multiple Links, so it reads one and writes both in a
+// single storage write. The dedicated per-context pages replace it later.
+const MarkerOfRadioValue: Record<string, BulletListMarker> = {
+  dash: '-',
+  asterisk: '*',
+  plus: '+',
+};
+
+const RadioValueOfMarker = Object.fromEntries(
+  Object.entries(MarkerOfRadioValue).map(([radioValue, marker]) => [marker, radioValue]),
+) as Record<BulletListMarker, string>;
 
 function showFlash(message: string): void {
   const flash = document.getElementById('flash-error');
@@ -25,9 +48,9 @@ function disableTabGroupIndentation(permissionStatuses: PermissionStatus): void 
   disableUiIfPermissionsNotGranted(permissionStatuses);
 }
 
-async function loadSettings(): Promise<void> {
+async function loadSettings(read: () => Promise<MarkdownSettings> = readMarkdownSettings): Promise<void> {
   try {
-    const settings = await Settings.getAll();
+    const { alwaysEscapeLinkBrackets, selection, multipleLinks } = await read();
     const formEscapeBrackets = document.forms.namedItem('form-link-text-always-escape-brackets');
     const formUnorderedList = document.forms.namedItem('form-style-of-unordered-list');
     const formCodeBlockStyle = document.forms.namedItem('form-style-of-code-block');
@@ -35,19 +58,19 @@ async function loadSettings(): Promise<void> {
 
     if (formEscapeBrackets) {
       const checkbox = formEscapeBrackets.elements.namedItem('enabled') as HTMLInputElement | null;
-      if (checkbox) checkbox.checked = settings.alwaysEscapeLinkBrackets;
+      if (checkbox) checkbox.checked = alwaysEscapeLinkBrackets;
     }
     if (formUnorderedList) {
       const character = formUnorderedList.elements.namedItem('character') as RadioNodeList | null;
-      if (character) character.value = settings.styleOfUnorderedList;
+      if (character) character.value = RadioValueOfMarker[selection.bulletListMarker];
     }
     if (formCodeBlockStyle) {
       const codeBlockStyle = formCodeBlockStyle.elements.namedItem('code-block-style') as RadioNodeList | null;
-      if (codeBlockStyle) codeBlockStyle.value = settings.styleOfCodeBlock;
+      if (codeBlockStyle) codeBlockStyle.value = selection.codeBlockStyle;
     }
     if (formTabGroupIndentation) {
       const indentation = formTabGroupIndentation.elements.namedItem('indentation') as RadioNodeList | null;
-      if (indentation) indentation.value = settings.styleOfTabGroupIndentation;
+      if (indentation) indentation.value = multipleLinks.tabGroupIndentation;
     }
     hideFlash();
   } catch (error) {
@@ -57,7 +80,9 @@ async function loadSettings(): Promise<void> {
 }
 
 document.addEventListener('DOMContentLoaded', async () => {
-  await loadSettings();
+  // Migrate before the first read so an upgrading profile never sees this page
+  // fall back to defaults. Idempotent, so racing the background copy is safe.
+  await loadSettings(loadMarkdownSettings);
   const statuses = await loadPermissions();
   hideUiIfPermissionsNotGranted(statuses);
   disableTabGroupIndentation(statuses);
@@ -82,7 +107,7 @@ if (formTabGroupIndentation) {
   formTabGroupIndentation.addEventListener('change', async (event) => {
     try {
       const target = event.target as HTMLInputElement;
-      await Settings.setStyleTabGroupIndentation(target.value as TabGroupIndentationStyle);
+      await MultipleLinksSettings.setTabGroupIndentation(target.value as TabGroupIndentationStyle);
       hideFlash();
     } catch (error) {
       console.error('failed to save settings:', error);
@@ -96,7 +121,9 @@ if (formUnorderedList) {
   formUnorderedList.addEventListener('change', async (event) => {
     try {
       const target = event.target as HTMLInputElement;
-      await Settings.setStyleOfUnrderedList(target.value as UnorderedListStyle);
+      const marker = MarkerOfRadioValue[target.value];
+      if (!marker) return;
+      await setSharedBulletListMarker(marker);
       hideFlash();
     } catch (error) {
       console.error('failed to save settings:', error);
@@ -110,7 +137,7 @@ if (formCodeBlockStyle) {
   formCodeBlockStyle.addEventListener('change', async (event) => {
     try {
       const target = event.target as HTMLInputElement;
-      await Settings.setStyleOfCodeBlock(target.value as CodeBlockStyle);
+      await SelectionSettings.setCodeBlockStyle(target.value as CodeBlockStyle);
       hideFlash();
     } catch (error) {
       console.error('failed to save settings:', error);
@@ -123,7 +150,7 @@ const resetButton = document.querySelector('#reset');
 if (resetButton) {
   resetButton.addEventListener('click', async () => {
     try {
-      await Settings.reset();
+      await resetMarkdownSettings();
       await loadSettings();
       hideFlash();
     } catch (error) {
@@ -134,7 +161,7 @@ if (resetButton) {
 }
 
 browser.storage.sync.onChanged.addListener(async (changes) => {
-  const hasSettingsChanged = Object.keys(changes).some(key => Settings.keys.includes(key));
+  const hasSettingsChanged = Object.keys(changes).some(key => markdownSettingsKeys.includes(key));
 
   if (hasSettingsChanged) {
     await loadSettings();
